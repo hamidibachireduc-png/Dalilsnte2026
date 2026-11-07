@@ -1,0 +1,43 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  body {
+    font-family: 'Cairo', 'Tajawal', sans-serif;
+  }
+
+  .font-display {
+    font-family: 'Amiri', serif;
+  }
+
+  .font-body {
+    font-family: 'Cairo', sans-serif;
+  }
+}
+
+/* Subtle geometric arabesque background pattern */
+.bg-arabesque-dark {
+  background-color: #06151f;
+  background-image: 
+    radial-gradient(circle at 10% 15%, rgba(220, 38, 38, 0.12) 0%, transparent 45%),
+    radial-gradient(circle at 90% 85%, rgba(22, 163, 74, 0.18) 0%, transparent 50%),
+    radial-gradient(circle at 50% 50%, rgba(212, 175, 55, 0.08) 0%, transparent 60%),
+    repeating-linear-gradient(45deg, rgba(212, 175, 55, 0.03) 0px, rgba(212, 175, 55, 0.03) 1px, transparent 1px, transparent 24px),
+    repeating-linear-gradient(-45deg, rgba(212, 175, 55, 0.03) 0px, rgba(212, 175, 55, 0.03) 1px, transparent 1px, transparent 24px);
+}
+
+.bg-arabesque-light {
+  background-color: #F8FAFC;
+  background-image: 
+    radial-gradient(circle at 10% 15%, rgba(220, 38, 38, 0.07) 0%, transparent 45%),
+    radial-gradient(circle at 90% 85%, rgba(22, 163, 74, 0.10) 0%, transparent 50%),
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.8) 0%, transparent 60%),
+    repeating-linear-gradient(45deg, rgba(22, 163, 74, 0.03) 0px, rgba(22, 163, 74, 0.03) 1px, transparent 1px, transparent 24px),
+    repeating-linear-gradient(-45deg, rgba(220, 38, 38, 0.03) 0px, rgba(220, 38, 38, 0.03) 1px, transparent 1px, transparent 24px);
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}
