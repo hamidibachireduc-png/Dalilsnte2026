@@ -28,7 +28,9 @@ import {
   Sun,
   Moon,
   ExternalLink,
-  ShieldCheck
+  ShieldCheck,
+  Mic,
+  MicOff
 } from 'lucide-react';
 import {
   SNTE_BOOK_PAGES,
@@ -53,6 +55,11 @@ export default function App() {
   const [isSpeechPlaying, setIsSpeechPlaying] = useState<boolean>(false);
   const [bookmarkedPages, setBookmarkedPages] = useState<number[]>([]);
   const [showImageModal, setShowImageModal] = useState<string | null>(null);
+
+  // Voice Search State
+  const [isListening, setIsListening] = useState<boolean>(false);
+  const [voiceSupported, setVoiceSupported] = useState<boolean>(true);
+  const [voiceFeedback, setVoiceFeedback] = useState<string | null>(null);
 
   // Day / Night Mode State (true = night/dark, false = day/light)
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
@@ -166,6 +173,69 @@ export default function App() {
 
     window.speechSynthesis.speak(utterance);
     setIsSpeechPlaying(true);
+  };
+
+  const handleVoiceSearch = () => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
+      setVoiceFeedback('المتصفح الحالي لا يدعم خاصية التعرف على الصوت. جرب متصفح Chrome.');
+      setTimeout(() => setVoiceFeedback(null), 4000);
+      return;
+    }
+
+    if (isListening) {
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'ar-DZ'; // Algerian Arabic & Arabic standard
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        setVoiceFeedback('تفضل بالتحدث الآن.. استمع إليك (مثال: "الانضباط"، "الأمانة الولائية"، "الاشتراكات")...');
+      };
+
+      recognition.onresult = (event: any) => {
+        const spokenText = event.results[0][0].transcript;
+        if (spokenText) {
+          setSearchQuery(spokenText);
+          setVoiceFeedback(`تم البحث عن: "${spokenText}"`);
+          setTimeout(() => setVoiceFeedback(null), 3500);
+        }
+        setIsListening(false);
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        setIsListening(false);
+        if (event.error === 'not-allowed') {
+          setVoiceFeedback('يرجى السماح بالوصول إلى الميكروفون من إعدادات المتصفح.');
+        } else if (event.error === 'no-speech') {
+          setVoiceFeedback('لم يتم التقاط أي صوت، يرجى المحاولة والتحدث بصوت واضح.');
+        } else {
+          setVoiceFeedback('تعذر التعرف على الصوت، يرجى المحاولة مجدداً.');
+        }
+        setTimeout(() => setVoiceFeedback(null), 4000);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognition.start();
+    } catch (err) {
+      console.error('Error starting recognition:', err);
+      setIsListening(false);
+      setVoiceFeedback('حدث خطأ أثناء تشغيل الميكروفون.');
+      setTimeout(() => setVoiceFeedback(null), 3000);
+    }
   };
 
   const handleQuizOptionSelect = (questionId: number, optionIdx: number) => {
@@ -825,26 +895,106 @@ ${window.location.origin}${window.location.pathname}?page=${currentPage.pageNumb
 
               {/* Search & Filter */}
               <div className="flex flex-wrap items-center gap-2.5">
-                <div className="relative">
-                  <Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-stone-400" />
+                <div className="relative flex items-center">
+                  <Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none" />
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="ابحث في المواد والمفاهيم..."
-                    className="pr-9 pl-3 py-1.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-stone-200 placeholder-stone-500 focus:outline-none focus:border-amber-400 w-48 sm:w-64"
+                    placeholder={isListening ? 'جاري الاستماع إليك...' : 'ابحث بالصوت أو النص...'}
+                    className={`pr-9 pl-10 py-2 text-xs rounded-xl transition-all focus:outline-none w-56 sm:w-72 ${
+                      isListening
+                        ? 'border-2 border-red-500 bg-red-950/30 text-white animate-pulse'
+                        : isDarkMode
+                        ? 'bg-slate-950 border border-slate-700 text-stone-200 placeholder-stone-500 focus:border-amber-400'
+                        : 'bg-white border border-stone-300 text-stone-900 placeholder-stone-400 focus:border-emerald-600 shadow-sm'
+                    }`}
                   />
+
+                  {/* Microphone Voice Search Button */}
+                  <button
+                    type="button"
+                    onClick={handleVoiceSearch}
+                    title={isListening ? 'إيقاف الاستماع' : 'البحث الصوتي عبر الميكروفون'}
+                    className={`absolute left-1.5 p-1.5 rounded-lg transition-all ${
+                      isListening
+                        ? 'bg-red-600 text-white animate-bounce'
+                        : isDarkMode
+                        ? 'text-stone-400 hover:text-amber-300 hover:bg-slate-800'
+                        : 'text-stone-500 hover:text-emerald-700 hover:bg-stone-100'
+                    }`}
+                  >
+                    {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                  </button>
                 </div>
+
+                {/* Reset Search Button if has query */}
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="text-[11px] px-2 py-1 rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300 transition"
+                  >
+                    مسح
+                  </button>
+                )}
 
                 <select
                   value={selectedPartFilter}
                   onChange={(e) => setSelectedPartFilter(e.target.value)}
-                  className="text-xs py-1.5 px-3 bg-slate-950 border border-slate-700 rounded-xl text-stone-200 focus:outline-none focus:border-amber-400"
+                  className={`text-xs py-2 px-3 rounded-xl border focus:outline-none transition ${
+                    isDarkMode
+                      ? 'bg-slate-950 border-slate-700 text-stone-200 focus:border-amber-400'
+                      : 'bg-white border-stone-300 text-stone-900 focus:border-emerald-600 shadow-sm'
+                  }`}
                 >
                   <option value="الكل">جميع الأبواب</option>
                   <option value="القانون الأساسي">القانون الأساسي</option>
                   <option value="النظام الداخلي">النظام الداخلي</option>
                 </select>
+              </div>
+            </div>
+
+            {/* Voice Recognition Feedback Banner */}
+            {voiceFeedback && (
+              <div
+                className={`py-2 px-4 rounded-xl text-xs font-semibold flex items-center justify-between gap-3 animate-fadeIn ${
+                  isListening
+                    ? 'bg-red-950/80 border border-red-500 text-red-200'
+                    : 'bg-emerald-950/80 border border-emerald-500 text-emerald-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+                  <span>{voiceFeedback}</span>
+                </div>
+                <button
+                  onClick={() => setVoiceFeedback(null)}
+                  className="text-stone-400 hover:text-white text-xs"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Match Counter and Quick Voice Search Suggestions */}
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-400 pt-1">
+              <span>
+                النتائج المطابقة: <strong className="text-amber-400 font-mono">{filteredPages.length}</strong> من أصل {SNTE_BOOK_PAGES.length} موضوع
+              </span>
+
+              {/* Quick suggestion tags */}
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="text-stone-500">جرب القول:</span>
+                {['الانضباط', 'الأمانة الولائية', 'الاشتراكات', 'الترشح والانتخاب'].map((tag) => (
+                  <button
+                    key={tag}
+                    onClick={() => setSearchQuery(tag)}
+                    className="px-2 py-0.5 rounded-full bg-slate-800/80 hover:bg-slate-700 text-stone-300 hover:text-amber-200 border border-slate-700 transition"
+                  >
+                    &quot;{tag}&quot;
+                  </button>
+                ))}
               </div>
             </div>
 

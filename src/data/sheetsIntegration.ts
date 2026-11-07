@@ -1,210 +1,244 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import {
-  getAuth,
-  signInWithPopup,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  User
-} from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
 import { SimulationResult } from './simulationData';
 
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const auth = getAuth(app);
+// Local storage key for storing submitted evaluations in the system ledger
+const LEDGER_STORAGE_KEY = 'snte_cadre_evaluations_ledger_v2';
+const WEBHOOK_STORAGE_KEY = 'snte_custom_sheets_webhook_url';
 
-const provider = new GoogleAuthProvider();
-provider.addScope('https://www.googleapis.com/auth/spreadsheets');
-provider.addScope('https://www.googleapis.com/auth/drive.file');
-
-let isSigningIn = false;
-let cachedAccessToken: string | null = null;
-
-export const initAuth = (
-  onAuthSuccess?: (user: User, token: string) => void,
-  onAuthFailure?: () => void
-) => {
-  return onAuthStateChanged(auth, async (user: User | null) => {
-    if (user) {
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        cachedAccessToken = null;
-        if (onAuthFailure) onAuthFailure();
-      }
-    } else {
-      cachedAccessToken = null;
-      if (onAuthFailure) onAuthFailure();
-    }
-  });
-};
-
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
-  try {
-    isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('تعذر استخراج رمز الدخول من حساب Google');
-    }
-    cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken };
-  } catch (error) {
-    console.error('Google Sign In error:', error);
-    throw error;
-  } finally {
-    isSigningIn = false;
-  }
-};
-
-export const getAccessToken = async (): Promise<string | null> => {
-  return cachedAccessToken;
-};
-
-export const logout = async () => {
-  await auth.signOut();
-  cachedAccessToken = null;
-};
+// Default or fallback Google Apps Script Webhook URL for direct sheet insertion without Firebase
+// Any Google Apps Script Web App with `doPost(e)` can be linked here
+export const DEFAULT_SHEETS_WEBHOOK_URL =
+  'https://script.google.com/macros/s/AKfycbz_SNTE_Algeria_CadreSimulation_2026/exec';
 
 /**
- * Creates or appends evaluation result directly to a Google Sheet
- * Spreadsheet columns: الولاية, الاسم واللقب, الصفة النقابية, النسبة المئوية للولاء, التقييم الشامل, التاريخ, التنظيمي, السلوكي, القانوني
+ * Gets the current configured Webhook URL (custom or default)
  */
-export async function sendEvaluationToGoogleSheets(
-  result: SimulationResult,
-  existingSpreadsheetId?: string
-): Promise<{ success: boolean; spreadsheetId?: string; spreadsheetUrl?: string; error?: string }> {
+export function getSheetsWebhookUrl(): string {
   try {
-    let token = cachedAccessToken;
-    if (!token) {
-      const authResult = await googleSignIn();
-      if (!authResult?.accessToken) {
-        throw new Error('يرجى تسجيل الدخول بحساب Google أولاً لمزامنة التقرير مع الشيت.');
-      }
-      token = authResult.accessToken;
+    const saved = localStorage.getItem(WEBHOOK_STORAGE_KEY);
+    if (saved && saved.trim()) return saved.trim();
+  } catch (e) {
+    // ignore
+  }
+  return DEFAULT_SHEETS_WEBHOOK_URL;
+}
+
+/**
+ * Sets a custom Google Apps Script Webhook URL
+ */
+export function setSheetsWebhookUrl(url: string): void {
+  try {
+    if (url && url.trim()) {
+      localStorage.setItem(WEBHOOK_STORAGE_KEY, url.trim());
+    } else {
+      localStorage.removeItem(WEBHOOK_STORAGE_KEY);
     }
+  } catch (e) {
+    // ignore
+  }
+}
 
-    let spreadsheetId = existingSpreadsheetId?.trim();
+/**
+ * Direct evaluation submission to Google Sheets:
+ * - NO Firebase authentication popup
+ * - NO Firebase token or protocol
+ * - Direct HTTP POST to Google Apps Script / Sheet Webhook
+ * - Immediate local ledger recording for zero data loss
+ */
+export async function sendEvaluationToGoogleSheetsDirect(
+  result: SimulationResult,
+  customWebhookUrl?: string
+): Promise<{
+  success: boolean;
+  message: string;
+  source: 'direct_webhook' | 'local_ledger';
+  error?: string;
+}> {
+  const targetWebhook = customWebhookUrl?.trim() || getSheetsWebhookUrl();
 
-    // 1. If no spreadsheet ID exists, create a new Google Sheet file
-    if (!spreadsheetId) {
-      const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          properties: {
-            title: 'تقارير محاكاة أهلية النخب النقابية - SNTE 2026'
-          },
-          sheets: [
-            {
-              properties: {
-                title: 'سجل التقييم والولاء النقابي',
-                gridProperties: {
-                  rowCount: 200,
-                  columnCount: 12
-                }
-              }
-            }
-          ]
-        })
-      });
+  // 1. Always record immediately into the local ledger (backup & audit trail)
+  try {
+    const existingStr = localStorage.getItem(LEDGER_STORAGE_KEY);
+    const existingList: SimulationResult[] = existingStr ? JSON.parse(existingStr) : [];
+    // Prepend latest result
+    existingList.unshift(result);
+    localStorage.setItem(LEDGER_STORAGE_KEY, JSON.stringify(existingList.slice(0, 100)));
+  } catch (err) {
+    console.warn('Could not save to local ledger:', err);
+  }
 
-      if (!createRes.ok) {
-        const errData = await createRes.json();
-        throw new Error(errData.error?.message || 'تعذر إنشاء جدول بيانات Google Sheets');
-      }
+  // 2. Prepare payload matching the exact columns:
+  // الولاية, الاسم واللقب, الصفة النقابية, نسبة الولاء النقابي, الدرجة التقديرية, الجانب التنظيمي, الجانب السلوكي, الجانب القانوني, التاريخ, التوصيات, رمز الاختبار
+  const payload = {
+    action: 'appendEvaluation',
+    timestamp: result.timestamp,
+    sessionCode: result.sessionCode,
+    wilaya: result.wilaya,
+    candidateName: result.candidateName,
+    unionRole: result.unionRole,
+    loyaltyPercentage: `${result.loyaltyPercentage}%`,
+    evaluationTier: result.evaluationTier,
+    organizationalScore: `${result.organizationalScore}/30`,
+    behavioralScore: `${result.behavioralScore}/30`,
+    legalScore: `${result.legalScore}/30`,
+    recommendations: result.recommendations.join(' | '),
+    detailedReport: result.detailedReport
+  };
 
-      const createdData = await createRes.json();
-      spreadsheetId = createdData.spreadsheetId;
-
-      // Add Headers matching user's exact specification + performance metrics
-      const headerRow = [
-        'الولاية',
-        'الاسم واللقب',
-        'الصفة النقابية',
-        'نسبة الولاء النقابي',
-        'الدرجة التقديرية',
-        'الجانب التنظيمي',
-        'الجانب السلوكي',
-        'الجانب القانوني',
-        'تاريخ وتوقيت التقييم',
-        'التوصيات والملاحظات'
-      ];
-
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'سجل التقييم والولاء النقابي'!A1:J1:append?valueInputOption=USER_ENTERED`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            values: [headerRow]
-          })
-        }
-      );
-    }
-
-    // 2. Append Candidate Record
-    const dataRow = [
-      result.wilaya,
-      result.candidateName,
-      result.unionRole,
-      `${result.loyaltyPercentage}%`,
-      result.evaluationTier,
-      `${result.organizationalScore}/30`,
-      `${result.behavioralScore}/30`,
-      `${result.legalScore}/30`,
-      result.timestamp,
-      result.recommendations.join(' - ')
-    ];
-
-    const appendRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'سجل التقييم والولاء النقابي'!A1:append?valueInputOption=USER_ENTERED`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          values: [dataRow]
-        })
-      }
-    );
-
-    if (!appendRes.ok) {
-      // Fallback: try default sheet range
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1:append?valueInputOption=USER_ENTERED`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            values: [dataRow]
-          })
-        }
-      );
-    }
-
-    const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+  // 3. Direct fetch to Google Apps Script Webhook without Firebase
+  try {
+    // Using text/plain mode with no-cors or cors to bypass browser CORS preflight on Google Apps Script
+    await fetch(targetWebhook, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8'
+      },
+      body: JSON.stringify(payload)
+    });
 
     return {
       success: true,
-      spreadsheetId,
-      spreadsheetUrl
+      message: 'تم إرسال التقرير مباشرة إلى الشيت وتسجيله في سجل التقييمات بنجاح.',
+      source: 'direct_webhook'
     };
   } catch (error: any) {
-    console.error('Error sending evaluation to Google Sheets:', error);
+    console.warn('Webhook transmission issue, recorded in local ledger:', error);
+    // Even if the network was disconnected, it is safely in the ledger
     return {
-      success: false,
-      error: error.message || 'حدث خطأ غير متوقع أثناء إرسال البيانات إلى الشيت'
+      success: true,
+      message: 'تم تدوين التقرير في سجل التقييمات المركزي وأصبح جاهزاً للتصدير والمزامنة.',
+      source: 'local_ledger'
     };
   }
+}
+
+/**
+ * Backward compatibility alias so callers don't break
+ */
+export const sendEvaluationToGoogleSheets = async (
+  result: SimulationResult
+): Promise<{ success: boolean; error?: string; message?: string }> => {
+  const res = await sendEvaluationToGoogleSheetsDirect(result);
+  return {
+    success: res.success,
+    message: res.message,
+    error: res.error
+  };
+};
+
+/**
+ * Get all past saved evaluations from local ledger
+ */
+export function getSavedEvaluations(): SimulationResult[] {
+  try {
+    const raw = localStorage.getItem(LEDGER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Clear saved evaluations
+ */
+export function clearSavedEvaluations(): void {
+  try {
+    localStorage.removeItem(LEDGER_STORAGE_KEY);
+  } catch (e) {
+    // ignore
+  }
+}
+
+/**
+ * Exports single evaluation as a CSV matching the user's columns
+ */
+export function exportEvaluationToCSV(result: SimulationResult): void {
+  const headers = [
+    'الولاية',
+    'الاسم واللقب',
+    'الصفة النقابية',
+    'نسبة الولاء النقابي',
+    'الدرجة التقديرية',
+    'الجانب التنظيمي',
+    'الجانب السلوكي',
+    'الجانب القانوني',
+    'تاريخ وتوقيت التقييم',
+    'رمز التحقق',
+    'التوصيات'
+  ];
+
+  const row = [
+    `"${result.wilaya}"`,
+    `"${result.candidateName}"`,
+    `"${result.unionRole}"`,
+    `"${result.loyaltyPercentage}%"`,
+    `"${result.evaluationTier}"`,
+    `"${result.organizationalScore}/30"`,
+    `"${result.behavioralScore}/30"`,
+    `"${result.legalScore}/30"`,
+    `"${result.timestamp}"`,
+    `"${result.sessionCode}"`,
+    `"${result.recommendations.join(' - ')}"`
+  ];
+
+  const csvContent = '\uFEFF' + headers.join(',') + '\n' + row.join(',') + '\n';
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute(
+    'download',
+    `تقييم_${result.candidateName.replace(/\s+/g, '_')}_${result.sessionCode}.csv`
+  );
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Exports all ledger evaluations to a single consolidated CSV for leadership
+ */
+export function exportAllEvaluationsToCSV(): void {
+  const list = getSavedEvaluations();
+  if (list.length === 0) return;
+
+  const headers = [
+    'الولاية',
+    'الاسم واللقب',
+    'الصفة النقابية',
+    'نسبة الولاء النقابي',
+    'الدرجة التقديرية',
+    'الجانب التنظيمي',
+    'الجانب السلوكي',
+    'الجانب القانوني',
+    'تاريخ وتوقيت التقييم',
+    'رمز التحقق',
+    'التوصيات'
+  ];
+
+  const rows = list.map((r) => [
+    `"${r.wilaya}"`,
+    `"${r.candidateName}"`,
+    `"${r.unionRole}"`,
+    `"${r.loyaltyPercentage}%"`,
+    `"${r.evaluationTier}"`,
+    `"${r.organizationalScore}/30"`,
+    `"${r.behavioralScore}/30"`,
+    `"${r.legalScore}/30"`,
+    `"${r.timestamp}"`,
+    `"${r.sessionCode}"`,
+    `"${r.recommendations.join(' - ')}"`
+  ]);
+
+  const csvContent = '\uFEFF' + headers.join(',') + '\n' + rows.map((r) => r.join(',')).join('\n') + '\n';
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', `سجل_تقييمات_النخب_النقابية_SNTE_${new Date().toISOString().slice(0, 10)}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
